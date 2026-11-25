@@ -14,90 +14,115 @@ import android.widget.Button
 import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
+import android.widget.Toast
+import androidx.core.app.ActivityCompat
+import androidx.core.content.ContextCompat
 import java.io.File
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
+import kotlin.math.sqrt
 
 class MainActivity : Activity(), SensorEventListener {
-    private lateinit var manager: SensorManager
-    private lateinit var sensorStatus: TextView
-    private lateinit var readingView: TextView
+    private lateinit var sensors: SensorManager
+    private lateinit var status: TextView
+    private lateinit var magnetic: TextView
+    private lateinit var motion: TextView
+    private lateinit var sensorList: TextView
     private lateinit var logView: TextView
     private var recorder: MediaRecorder? = null
-    private var audioFile: File? = null
-    private val logs = mutableListOf<String>()
+    private var recordingFile: File? = null
+    private val events = mutableListOf<String>()
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        manager = getSystemService(SENSOR_SERVICE) as SensorManager
-        val root = LinearLayout(this).apply {
-            orientation = LinearLayout.VERTICAL
-            setPadding(24, 24, 24, 24)
-        }
-        root.addView(TextView(this).apply {
-            text = "JARVIS Paranormal Research"
-            textSize = 23f
-        })
-        sensorStatus = TextView(this).apply { textSize = 14f }
-        readingView = TextView(this).apply { textSize = 16f }
-        root.addView(sensorStatus)
-        root.addView(readingView)
-        root.addView(Button(this).apply {
-            text = "Start audio recording"
-            setOnClickListener {
-                if (recorder == null) startRecording() else stopRecording()
-                text = if (recorder == null) "Start audio recording" else "Stop audio recording"
-            }
-        })
-        root.addView(Button(this).apply {
-            text = "Add observation log"
-            setOnClickListener { addLog("Manual observation recorded.") }
-        })
-        root.addView(TextView(this).apply {
-            text = "Observation history"
-            textSize = 18f
-        })
-        logView = TextView(this).apply { textSize = 13f }
-        root.addView(logView)
-        setContentView(ScrollView(this).apply { addView(root) })
-        showSensors()
+        sensors = getSystemService(SENSOR_SERVICE) as SensorManager
+        buildUi()
+        registerSensors()
+        logEvent("Session started")
     }
 
-    private fun showSensors() {
-        val sensors = manager.getSensorList(Sensor.TYPE_ALL)
-        val list = sensors.joinToString("\n") { "• ${it.name} (type ${it.type})" }
-        sensorStatus.text = "Detected sensors: ${sensors.size}\n$list"
-        val accel = manager.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
-        val magnet = manager.getDefaultSensor(Sensor.TYPE_MAGNETIC_FIELD)
-        readingView.text = "Accelerometer: ${if (accel == null) "not available" else "available"}\n" +
-            "Magnetometer: ${if (magnet == null) "not available" else "available"}\n" +
-            "Live readings will appear here. These measurements do not detect or prove paranormal activity."
-        accel?.let { manager.registerListener(this, it, SensorManager.SENSOR_DELAY_NORMAL) }
-        magnet?.let { manager.registerListener(this, it, SensorManager.SENSOR_DELAY_NORMAL) }
+    private fun buildUi() {
+        val root = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(20, 24, 20, 24)
+            setBackgroundColor(0xFF101820.toInt())
+        }
+        fun text(value: String, size: Float = 16f) = TextView(this).apply {
+            this.text = value
+            textSize = size
+            setTextColor(0xFFEAF2F8.toInt())
+            setPadding(0, 8, 0, 8)
+        }
+        root.addView(text("JARVIS PARANORMAL RESEARCH", 22f))
+        status = text("LIVE OBSERVATION • Initializing")
+        root.addView(status)
+        magnetic = text("Magnetic field: waiting for sensor")
+        root.addView(magnetic)
+        motion = text("Device motion: waiting for sensor")
+        root.addView(motion)
+        sensorList = text("Available sensors: checking…")
+        root.addView(sensorList)
+        val recordButton = Button(this).apply {
+            text = "Start audio recording"
+            setOnClickListener { if (recorder == null) startAudio(this) else stopAudio(this) }
+        }
+        root.addView(recordButton)
+        root.addView(Button(this).apply {
+            text = "Add observation marker"
+            setOnClickListener { logEvent("Manual observation marker") }
+        })
+        root.addView(Button(this).apply {
+            text = "Export session log"
+            setOnClickListener { exportLog() }
+        })
+        root.addView(text("EVIDENCE LOG", 18f))
+        logView = text("No events yet")
+        root.addView(ScrollView(this).apply { addView(logView) }, LinearLayout.LayoutParams(-1, 0, 1f))
+        setContentView(root)
+    }
+
+    private fun registerSensors() {
+        val available = sensors.getSensorList(Sensor.TYPE_ALL)
+        sensorList.text = "Available sensors (" + available.size + "): " +
+            available.joinToString { it.name }.ifBlank { "None reported" }
+        val mag = sensors.getDefaultSensor(Sensor.TYPE_MAGNETIC_FIELD)
+        val accel = sensors.getDefaultSensor(Sensor.TYPE_ACCELEROMETER)
+        val gyro = sensors.getDefaultSensor(Sensor.TYPE_GYROSCOPE)
+        status.text = "LIVE • Magnetic: " + (mag != null) + " | Accelerometer: " +
+            (accel != null) + " | Gyroscope: " + (gyro != null)
+        mag?.let { sensors.registerListener(this, it, SensorManager.SENSOR_DELAY_UI) }
+        accel?.let { sensors.registerListener(this, it, SensorManager.SENSOR_DELAY_UI) }
+        gyro?.let { sensors.registerListener(this, it, SensorManager.SENSOR_DELAY_UI) }
     }
 
     override fun onSensorChanged(event: SensorEvent) {
-        val name = when (event.sensor.type) {
-            Sensor.TYPE_ACCELEROMETER -> "Acceleration (m/s²)"
-            Sensor.TYPE_MAGNETIC_FIELD -> "Magnetic field (µT)"
-            else -> return
+        val v = event.values
+        when (event.sensor.type) {
+            Sensor.TYPE_MAGNETIC_FIELD -> magnetic.text =
+                "Magnetic field: X %.1f, Y %.1f, Z %.1f µT | magnitude %.1f µT".format(
+                    Locale.US, v[0], v[1], v[2],
+                    sqrt(v.sumOf { (it * it).toDouble() }).toFloat()
+                )
+            Sensor.TYPE_ACCELEROMETER -> motion.text =
+                "Acceleration: X %.2f, Y %.2f, Z %.2f m/s²".format(Locale.US, v[0], v[1], v[2])
         }
-        val values = event.values.joinToString(", ") { String.format(Locale.US, "%.2f", it) }
-        val old = readingView.text.toString().substringBefore("\nLive readings:")
-        readingView.text = "$old\nLive readings:\n$name: [$values]\nNearby electronics, wiring, metal, and movement can affect readings."
     }
 
     override fun onAccuracyChanged(sensor: Sensor?, accuracy: Int) = Unit
 
-    private fun startRecording() {
-        if (checkSelfPermission(Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
-            requestPermissions(arrayOf(Manifest.permission.RECORD_AUDIO), 41)
+    private fun makeRecorder(): MediaRecorder =
+        if (Build.VERSION.SDK_INT >= 31) MediaRecorder(this) else MediaRecorder()
+
+    private fun startAudio(button: Button) {
+        if (ContextCompat.checkSelfPermission(this, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+            ActivityCompat.requestPermissions(this, arrayOf(Manifest.permission.RECORD_AUDIO), 41)
+            Toast.makeText(this, "Allow microphone permission, then tap record again.", Toast.LENGTH_LONG).show()
             return
         }
         try {
-            val file = File(filesDir, "audio_${System.currentTimeMillis()}.m4a")
-            val r = if (Build.VERSION.SDK_INT >= 31) MediaRecorder(this) else MediaRecorder()
+            val file = File(getExternalFilesDir(null), "observation-" + System.currentTimeMillis() + ".m4a")
+            val r = makeRecorder()
             r.setAudioSource(MediaRecorder.AudioSource.MIC)
             r.setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
             r.setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
@@ -105,48 +130,64 @@ class MainActivity : Activity(), SensorEventListener {
             r.prepare()
             r.start()
             recorder = r
-            audioFile = file
-            addLog("Audio recording started: ${file.name}")
+            recordingFile = file
+            button.text = "Stop audio recording"
+            logEvent("Audio recording started")
         } catch (e: Exception) {
             recorder?.release()
             recorder = null
-            addLog("Recording could not start: ${e.javaClass.simpleName}")
+            Toast.makeText(this, "Recording failed: " + e.message, Toast.LENGTH_LONG).show()
         }
     }
 
-    private fun stopRecording() {
+    private fun stopAudio(button: Button) {
         try {
             recorder?.stop()
-            addLog("Audio saved in app-private storage: ${audioFile?.name ?: "file"}")
+            logEvent("Audio saved: " + (recordingFile?.name ?: "unknown"))
         } catch (_: Exception) {
-            addLog("Recording stopped; audio file may be incomplete.")
+            logEvent("Audio recording stopped; file may be incomplete")
         } finally {
             recorder?.release()
             recorder = null
-            audioFile = null
+            recordingFile = null
+            button.text = "Start audio recording"
         }
     }
 
-    private fun addLog(message: String) {
-        val time = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.getDefault()).format(Date())
-        logs.add(0, "[$time] $message")
-        logView.text = logs.joinToString("\n")
+    private fun logEvent(message: String) {
+        val stamp = SimpleDateFormat("yyyy-MM-dd HH:mm:ss", Locale.US).format(Date())
+        events.add("[" + stamp + "] " + message)
+        logView.text = events.takeLast(100).joinToString("\n")
+    }
+
+    private fun exportLog() {
+        val file = File(getExternalFilesDir(null), "evidence-log-" + System.currentTimeMillis() + ".txt")
+        file.writeText(events.joinToString("\n"))
+        Toast.makeText(this, "Log saved: " + file.absolutePath, Toast.LENGTH_LONG).show()
+        logEvent("Evidence log exported: " + file.name)
     }
 
     override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
         super.onRequestPermissionsResult(requestCode, permissions, grantResults)
         if (requestCode == 41 && grantResults.firstOrNull() == PackageManager.PERMISSION_GRANTED) {
-            startRecording()
-        } else if (requestCode == 41) {
-            addLog("Microphone permission denied.")
+            Toast.makeText(this, "Microphone permission granted. Tap record again.", Toast.LENGTH_SHORT).show()
         }
     }
 
+    override fun onPause() {
+        super.onPause()
+        sensors.unregisterListener(this)
+    }
+
+    override fun onResume() {
+        super.onResume()
+        if (::sensors.isInitialized) registerSensors()
+    }
+
     override fun onDestroy() {
-        manager.unregisterListener(this)
         try { recorder?.stop() } catch (_: Exception) { }
         recorder?.release()
-        recorder = null
+        sensors.unregisterListener(this)
         super.onDestroy()
     }
 }
